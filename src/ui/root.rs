@@ -742,11 +742,11 @@ impl Render for RootView {
                     .flex()
                     .items_center()
                     .cursor_pointer()
-                    .bg(t.sidebar_accent)
+                    .bg(t.selection)
                     .child(
                         div()
                             .text_xs()
-                            .text_color(t.muted_foreground)
+                            .text_color(t.sidebar_accent_foreground)
                             .child(format!(
                                 "{} {} archived notes",
                                 if self.show_archived { "Hide" } else { "Show" },
