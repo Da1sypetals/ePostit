@@ -15,6 +15,7 @@ use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::{ActiveTheme, Icon, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use std::collections::HashSet;
 use std::ops::Range;
 use std::time::Duration;
 
@@ -24,6 +25,7 @@ const BREADCRUMBS_LEFT_SVG: &[u8] = include_bytes!("../../assets/icons/breadcrum
 const ARCHIVE_SVG: &[u8] = include_bytes!("../../assets/icons/archive.svg");
 const UNARCHIVE_SVG: &[u8] = include_bytes!("../../assets/icons/unarchive.svg");
 const DELETE_SVG: &[u8] = include_bytes!("../../assets/icons/delete.svg");
+const CROSS_SVG: &[u8] = include_bytes!("../../assets/icons/cross.svg");
 const RAIL_WIDTH: f32 = 48.;
 
 pub struct RootView {
@@ -39,6 +41,9 @@ pub struct RootView {
     rename_input: Option<Entity<InputState>>,
     show_archived: bool,
     hovered_row: Option<String>,
+    search_input: Entity<InputState>,
+    search_query: String,
+    search_matches: HashSet<String>,
     dirty: bool,
     save_gen: u64,
     window_active: bool,
@@ -71,10 +76,17 @@ impl RootView {
             )
         });
 
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+
         let subscriptions = vec![
             cx.subscribe_in(&editor, window, |this, _, ev, window, cx| {
                 if matches!(ev, InputEvent::Change) {
                     this.on_editor_change(window, cx);
+                }
+            }),
+            cx.subscribe_in(&search_input, window, |this, _, ev, _, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    this.on_search_change(cx);
                 }
             }),
             cx.subscribe_in(&sort, window, |this, _, ev, _, cx| {
@@ -97,6 +109,9 @@ impl RootView {
             rename_input: None,
             show_archived: false,
             hovered_row: None,
+            search_input,
+            search_query: String::new(),
+            search_matches: HashSet::new(),
             dirty: false,
             save_gen: 0,
             window_active: window.is_window_active(),
@@ -196,6 +211,42 @@ impl RootView {
         store.save(note, &body);
         self.dirty = false;
         self.sort_notes();
+        self.refresh_search_matches();
+    }
+
+    /// 搜索词变化时重算匹配集合:标题或正文命中即展示
+    fn on_search_change(&mut self, cx: &mut Context<Self>) {
+        self.search_query = self.search_input.read(cx).value().to_string();
+        self.refresh_search_matches();
+        cx.notify();
+    }
+
+    fn refresh_search_matches(&mut self) {
+        self.search_matches.clear();
+        if self.search_query.is_empty() {
+            return;
+        }
+        let query = self.search_query.to_lowercase();
+        for note in &self.notes {
+            if note.title.to_lowercase().contains(&query)
+                || self.store.body(note).to_lowercase().contains(&query)
+            {
+                self.search_matches.insert(note.id.clone());
+            }
+        }
+    }
+
+    fn note_matches(&self, id: &str) -> bool {
+        self.search_query.is_empty() || self.search_matches.contains(id)
+    }
+
+    /// set_value 静默写入不发 Change 事件,查询状态需手动同步
+    fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_input
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.search_query.clear();
+        self.refresh_search_matches();
+        cx.notify();
     }
 
     fn on_editor_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -298,6 +349,7 @@ impl RootView {
         }
         self.rename_input = None;
         self.sort_notes();
+        self.refresh_search_matches();
         self.list_focus.focus(window, cx);
         cx.notify();
     }
@@ -662,6 +714,22 @@ impl Render for RootView {
                                 .child(Select::new(&self.sort).small().w(px(128.))),
                         )
                         .child(
+                            h_flex()
+                                .px_4()
+                                .pb_2()
+                                .items_center()
+                                .gap_1()
+                                .child(Input::new(&self.search_input).small().w_full())
+                                .when(!self.search_query.is_empty(), |this| {
+                                    this.child(self.row_button(
+                                        "clear-search",
+                                        CROSS_SVG,
+                                        |this, window, cx| this.clear_search(window, cx),
+                                        cx,
+                                    ))
+                                }),
+                        )
+                        .child(
                             v_flex()
                                 .id("rows")
                                 .flex_1()
@@ -670,7 +738,9 @@ impl Render for RootView {
                                     let mut rows: Vec<AnyElement> =
                                         Vec::with_capacity(self.notes.len() + 2);
                                     for (ix, note) in
-                                        self.notes.iter().enumerate().filter(|(_, n)| !n.archived)
+                                        self.notes.iter().enumerate().filter(|(_, n)| {
+                                            !n.archived && self.note_matches(&n.id)
+                                        })
                                     {
                                         rows.push(
                                             self.render_note_row(ix, note, &*cx).into_any_element(),
@@ -680,7 +750,7 @@ impl Render for RootView {
                                         .notes
                                         .iter()
                                         .enumerate()
-                                        .filter(|(_, n)| n.archived)
+                                        .filter(|(_, n)| n.archived && self.note_matches(&n.id))
                                         .collect();
                                     if !archived.is_empty() {
                                         // 展开后此行保留,归档条目列在它下面
@@ -962,7 +1032,9 @@ mod tests {
     };
     use crate::store::Store;
     use gpui_kit::component::WindowExt;
-    use gpui_kit::{AppContext, Entity, TestAppContext, VisualTestContext, WindowOptions};
+    use gpui_kit::{
+        AppContext, Entity, Focusable, TestAppContext, VisualTestContext, WindowOptions,
+    };
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -1162,7 +1234,7 @@ mod tests {
         let (view, cx) = harness(cx, &dir);
         set_editor(&view, cx, "archived body");
         cx.update(|_, cx| {
-            view.update(cx, |this, cx| this.dirty = false);
+            view.update(cx, |this, _| this.dirty = false);
         });
         let id = cx.update(|_, cx| view.read(cx).current.clone().unwrap());
         cx.update(|_, cx| {
@@ -1305,6 +1377,67 @@ mod tests {
         cx.dispatch_action(SmartCopy);
         let item = cx.read_from_clipboard().expect("clipboard item");
         assert_eq!(item.text(), Some("two".to_string()));
+    }
+
+    fn type_search(view: &Entity<RootView>, cx: &mut VisualTestContext, text: &str) {
+        cx.update(|window, cx| {
+            let focus = view.read(cx).search_input.read(cx).focus_handle(cx).clone();
+            focus.focus(window, cx);
+        });
+        cx.simulate_input(text);
+        cx.cx.run_until_parked();
+    }
+
+    #[test]
+    fn search_filters_by_title_and_body() {
+        let cx = &mut TestAppContext::single();
+        let dir = notes_dir("search");
+        let (view, cx) = harness(cx, &dir);
+        let note_a = cx.update(|_, cx| view.read(cx).current.clone().unwrap());
+        cx.dispatch_action(NewNote);
+        let note_b = cx.update(|_, cx| view.read(cx).current.clone().unwrap());
+        // A 标题命中 needle,B 正文命中 special
+        cx.update(|_, cx| {
+            view.update(cx, |this, _| {
+                let store = &this.store;
+                let note = this
+                    .notes
+                    .iter_mut()
+                    .find(|n| n.id == note_a)
+                    .expect("note a");
+                store.rename(note, "Foo needle title");
+            });
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| this.focus_editor(window, cx));
+        });
+        cx.simulate_input("special body");
+        cx.executor().advance_clock(Duration::from_millis(600));
+        cx.cx.run_until_parked();
+
+        type_search(&view, cx, "needle");
+        cx.update(|_, cx| {
+            let this = view.read(cx);
+            assert!(this.note_matches(&note_a));
+            assert!(!this.note_matches(&note_b));
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| this.clear_search(window, cx));
+        });
+        type_search(&view, cx, "special");
+        cx.update(|_, cx| {
+            let this = view.read(cx);
+            assert!(!this.note_matches(&note_a));
+            assert!(this.note_matches(&note_b));
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| this.clear_search(window, cx));
+        });
+        cx.update(|_, cx| {
+            let this = view.read(cx);
+            assert!(this.search_query.is_empty());
+            assert!(this.note_matches(&note_a) && this.note_matches(&note_b));
+        });
     }
 
     #[test]
