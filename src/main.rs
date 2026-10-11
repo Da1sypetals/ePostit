@@ -108,6 +108,7 @@ fn main() {
         gpui_kit::init(cx);
         theme::apply(cx);
         keymap::bind(cx);
+        disable_titlebar_double_click();
 
         let config = Config::load();
         std::fs::create_dir_all(&config.notes_dir).expect("create notes dir");
@@ -221,6 +222,24 @@ fn hide_traffic_lights(window: &mut Window) {
 
 #[cfg(not(target_os = "macos"))]
 fn hide_traffic_lights(_: &mut Window) {}
+
+/// 禁用标题栏双击放大:在本应用 defaults 域写 AppleActionOnDoubleClick = None,
+/// 覆盖全局域设置,只对 ePostit 生效
+#[cfg(target_os = "macos")]
+fn disable_titlebar_double_click() {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    use objc2_foundation::NSString;
+    unsafe {
+        let defaults: *mut AnyObject = msg_send![class!(NSUserDefaults), standardUserDefaults];
+        let key = NSString::from_str("AppleActionOnDoubleClick");
+        let value = NSString::from_str("None");
+        let _: () = msg_send![&*defaults, setObject: &*value, forKey: &*key];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn disable_titlebar_double_click() {}
 
 /// 把窗口移动到鼠标所在显示屏的中央;找不到含鼠标的屏时不动
 #[cfg(target_os = "macos")]

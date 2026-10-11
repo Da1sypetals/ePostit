@@ -4,7 +4,7 @@ use crate::keymap::*;
 use crate::store::{Note, Store};
 use chrono::{DateTime, Local};
 use gpui_kit::base::IndexPath;
-use gpui_kit::base::input::{InputBaseState, InputModeKind};
+use gpui_kit::base::input::{InputBaseState, InputModeKind, Paste};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::input::{
@@ -47,6 +47,8 @@ pub struct RootView {
     search_input: Entity<InputState>,
     search_query: String,
     search_matches: HashSet<String>,
+    // 空选区复制/剪切整行写入剪贴板的文本,粘贴时按文本匹配决定整行粘贴
+    copied_line: Option<String>,
     dirty: bool,
     save_gen: u64,
     window_active: bool,
@@ -116,6 +118,7 @@ impl RootView {
             search_input,
             search_query: String::new(),
             search_matches: HashSet::new(),
+            copied_line: None,
             dirty: false,
             save_gen: 0,
             window_active: window.is_window_active(),
@@ -525,11 +528,44 @@ impl RootView {
         let Some(input) = window.focused_input(cx) else {
             return;
         };
-        match input {
+        let copied = match input {
             AnyInputState::Editor(e) => e.update(cx, |s, cx| run_line_op(s, window, cx, op)),
             AnyInputState::Textarea(e) => e.update(cx, |s, cx| run_line_op(s, window, cx, op)),
             AnyInputState::Input(e) => e.update(cx, |s, cx| run_line_op(s, window, cx, op)),
-            AnyInputState::Otp(_) => {}
+            AnyInputState::Otp(_) => None,
+        };
+        if let Some((copied, is_line)) = copied {
+            self.copied_line = is_line.then_some(copied);
+        }
+    }
+
+    /// 行拷贝的内容粘贴到当前行上方,其余情况交给输入组件的默认粘贴
+    fn smart_paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let clip = cx.read_from_clipboard().and_then(|item| item.text());
+        let line_paste = clip.as_deref().is_some_and(|text| {
+            self.copied_line.as_deref() == Some(text) && text.find('\n') == Some(text.len() - 1)
+        });
+        let Some(input) = window.focused_input(cx) else {
+            return;
+        };
+        let mut done = false;
+        if line_paste {
+            let text = clip.unwrap();
+            done = match input {
+                AnyInputState::Editor(e) => {
+                    e.update(cx, |s, cx| paste_line_above(s, window, cx, &text))
+                }
+                AnyInputState::Textarea(e) => {
+                    e.update(cx, |s, cx| paste_line_above(s, window, cx, &text))
+                }
+                AnyInputState::Input(e) => {
+                    e.update(cx, |s, cx| paste_line_above(s, window, cx, &text))
+                }
+                AnyInputState::Otp(_) => false,
+            };
+        }
+        if !done {
+            window.dispatch_action(Box::new(Paste), cx);
         }
     }
 
@@ -944,6 +980,7 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &SmartCopy, window, cx| {
                 this.line_op(window, cx, LineOp::SmartCopy)
             }))
+            .on_action(cx.listener(|this, _: &SmartPaste, window, cx| this.smart_paste(window, cx)))
             .on_action(cx.listener(|this, _: &DeleteLine, window, cx| {
                 this.line_op(window, cx, LineOp::DeleteLine)
             }))
@@ -996,12 +1033,13 @@ fn line_text<'a>(text: &'a str, range: Range<usize>) -> &'a str {
     text[range].trim_end_matches(['\n', '\r'])
 }
 
+/// 返回值为复制/剪切写入剪贴板的内容,is_line 表示来自空选区整行操作
 fn run_line_op<M: InputModeKind>(
     state: &mut InputBaseState<M>,
     window: &mut Window,
     cx: &mut Context<InputBaseState<M>>,
     op: LineOp,
-) {
+) -> Option<(String, bool)> {
     let text = state.text().to_string();
     let starts = line_starts(&text);
     let len_lines = starts.len();
@@ -1010,23 +1048,33 @@ fn run_line_op<M: InputModeKind>(
     match op {
         LineOp::SmartCut => {
             if state.selected_range().is_empty() {
-                state.set_selected_range(line_range(&starts, text.len(), line), cx);
-            }
-            let copied = state.selected_text().to_string();
-            cx.write_to_clipboard(ClipboardItem::new_string(copied));
-            state.replace("", window, cx);
-        }
-        LineOp::SmartCopy => {
-            if state.selected_range().is_empty() {
-                // 无选区时复制整行(含行尾换行符),光标保持原位
-                state.set_selected_range(line_range(&starts, text.len(), line), cx);
-                let copied = state.selected_text().to_string();
-                state.set_selected_range(cursor..cursor, cx);
-                cx.write_to_clipboard(ClipboardItem::new_string(copied));
+                let mut range = line_range(&starts, text.len(), line);
+                let copied = format!("{}\n", line_text(&text, range.clone()));
+                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+                if range.end == text.len() && range.start > 0 && line == len_lines - 1 {
+                    // 最后一行没有换行符,连带删除上一行的换行符
+                    range.start -= 1;
+                }
+                state.set_selected_range(range, cx);
+                state.replace("", window, cx);
+                Some((copied, true))
             } else {
                 let copied = state.selected_text().to_string();
-                cx.write_to_clipboard(ClipboardItem::new_string(copied));
+                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+                state.replace("", window, cx);
+                Some((copied, false))
             }
+        }
+        LineOp::SmartCopy => {
+            let (copied, is_line) = if state.selected_range().is_empty() {
+                // 无选区时复制整行内容加一个换行符,最后一行也补换行符
+                let range = line_range(&starts, text.len(), line);
+                (format!("{}\n", line_text(&text, range)), true)
+            } else {
+                (state.selected_text().to_string(), false)
+            };
+            cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+            Some((copied, is_line))
         }
         LineOp::DeleteLine => {
             let mut range = line_range(&starts, text.len(), line);
@@ -1036,6 +1084,7 @@ fn run_line_op<M: InputModeKind>(
             }
             state.set_selected_range(range, cx);
             state.replace("", window, cx);
+            None
         }
         LineOp::DuplicateLine => {
             let range = line_range(&starts, text.len(), line);
@@ -1047,6 +1096,7 @@ fn run_line_op<M: InputModeKind>(
             } else {
                 state.insert(format!("\n{content}"), window, cx);
             }
+            None
         }
         LineOp::MoveLine(up) => {
             let target = if up {
@@ -1055,7 +1105,7 @@ fn run_line_op<M: InputModeKind>(
                 (line + 1 < len_lines).then_some(line + 1)
             };
             let Some(target) = target else {
-                return;
+                return None;
             };
             let cur = line_range(&starts, text.len(), line);
             let tgt = line_range(&starts, text.len(), target);
@@ -1080,8 +1130,30 @@ fn run_line_op<M: InputModeKind>(
             state.set_selected_range(span, cx);
             state.replace(new_text, window, cx);
             state.set_selected_range(new_cursor..new_cursor, cx);
+            None
         }
     }
+}
+
+/// 行粘贴:整行内容插到光标所在行的行首,原行下移,光标保持原列
+fn paste_line_above<M: InputModeKind>(
+    state: &mut InputBaseState<M>,
+    window: &mut Window,
+    cx: &mut Context<InputBaseState<M>>,
+    text: &str,
+) -> bool {
+    if !state.is_editable() || !state.is_multi_line() || !state.selected_range().is_empty() {
+        return false;
+    }
+    let doc = state.text().to_string();
+    let starts = line_starts(&doc);
+    let cursor = state.cursor().min(doc.len());
+    let pos = starts[line_of_offset(&doc, cursor)];
+    state.set_selected_range(pos..pos, cx);
+    state.replace(text, window, cx);
+    let restored = cursor + text.len();
+    state.set_selected_range(restored..restored, cx);
+    true
 }
 
 #[cfg(test)]
@@ -1090,7 +1162,7 @@ mod tests {
     use crate::config::Config;
     use crate::keymap::{
         DeleteLine, DeleteNote, DuplicateLine, MoveLineDown, MoveLineUp, NewNote, RenameNote,
-        SmartCopy, SmartCut,
+        SmartCopy, SmartCut, SmartPaste,
     };
     use crate::store::Store;
     use gpui_kit::component::WindowExt;
@@ -1450,6 +1522,13 @@ mod tests {
         assert_eq!(editor_value(&view, cx), "one\nthree");
         let item = cx.read_from_clipboard().expect("clipboard item");
         assert_eq!(item.text(), Some("two\n".to_string()));
+        // 剪切最后一行连带删掉上一行的换行符
+        set_editor(&view, cx, "one\ntwo");
+        set_cursor(&view, cx, 5);
+        cx.dispatch_action(SmartCut);
+        assert_eq!(editor_value(&view, cx), "one");
+        let item = cx.read_from_clipboard().expect("clipboard item");
+        assert_eq!(item.text(), Some("two\n".to_string()));
     }
 
     #[test]
@@ -1464,6 +1543,11 @@ mod tests {
         assert_eq!(editor_value(&view, cx), "one\ntwo\nthree");
         let item = cx.read_from_clipboard().expect("clipboard item");
         assert_eq!(item.text(), Some("two\n".to_string()));
+        // 最后一行没有换行符也补一个
+        set_cursor(&view, cx, 10);
+        cx.dispatch_action(SmartCopy);
+        let item = cx.read_from_clipboard().expect("clipboard item");
+        assert_eq!(item.text(), Some("three\n".to_string()));
         // 有选区时按选区复制
         cx.update(|_, cx| {
             view.update(cx, |this, cx| {
@@ -1474,6 +1558,34 @@ mod tests {
         cx.dispatch_action(SmartCopy);
         let item = cx.read_from_clipboard().expect("clipboard item");
         assert_eq!(item.text(), Some("two".to_string()));
+    }
+
+    #[test]
+    fn line_paste_inserts_above_current_line() {
+        let cx = &mut TestAppContext::single();
+        let dir = notes_dir("line_paste");
+        let (view, cx) = harness(cx, &dir);
+        set_editor(&view, cx, "one\ntwo\nthree");
+        set_cursor(&view, cx, 4);
+        cx.dispatch_action(SmartCopy);
+        // 光标移到第三行中间,粘贴的整行插到该行上方,光标列保持不变
+        set_cursor(&view, cx, 10);
+        cx.dispatch_action(SmartPaste);
+        assert_eq!(editor_value(&view, cx), "one\ntwo\ntwo\nthree");
+        cx.update(|_, cx| {
+            view.update(cx, |this, cx| {
+                this.editor.update(cx, |s, _| assert_eq!(s.cursor(), 14));
+            })
+        });
+        // 有选区时走普通粘贴:选区内容被替换
+        cx.update(|_, cx| {
+            view.update(cx, |this, cx| {
+                this.editor
+                    .update(cx, |s, cx| s.set_selected_range(0..3, cx));
+            })
+        });
+        cx.dispatch_action(SmartPaste);
+        assert_eq!(editor_value(&view, cx), "two\n\ntwo\ntwo\nthree");
     }
 
     fn type_search(view: &Entity<RootView>, cx: &mut VisualTestContext, text: &str) {

@@ -11,6 +11,7 @@ gpui_kit::actions!(
         DeleteNote,
         SmartCut,
         SmartCopy,
+        SmartPaste,
         DeleteLine,
         DuplicateLine,
         MoveLineUp,
@@ -36,6 +37,7 @@ pub fn bind(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-x", SmartCut, Some("Input")),
         KeyBinding::new("cmd-c", SmartCopy, Some("Input")),
+        KeyBinding::new("cmd-v", SmartPaste, Some("Input")),
         KeyBinding::new("cmd-shift-k", DeleteLine, Some("Input")),
         KeyBinding::new("cmd-shift-d", DuplicateLine, Some("Input")),
         KeyBinding::new("alt-up", MoveLineUp, Some("Input")),
