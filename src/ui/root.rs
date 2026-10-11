@@ -43,6 +43,7 @@ pub struct RootView {
     rename_input: Option<Entity<InputState>>,
     show_archived: bool,
     hovered_row: Option<String>,
+    row_bounds: Vec<(Option<String>, Bounds<Pixels>)>,
     search_input: Entity<InputState>,
     search_query: String,
     search_matches: HashSet<String>,
@@ -111,6 +112,7 @@ impl RootView {
             rename_input: None,
             show_archived: false,
             hovered_row: None,
+            row_bounds: Vec::new(),
             search_input,
             search_query: String::new(),
             search_matches: HashSet::new(),
@@ -423,6 +425,32 @@ impl RootView {
         cx.notify();
     }
 
+    /// 删除等布局变化让条目移到静止的鼠标下方时 on_hover 不会再派发,
+    /// 每帧按 prepaint 拿到的子元素位置重算鼠标下的条目
+    fn reconcile_hovered_row(
+        &mut self,
+        row_ids: &[Option<String>],
+        bounds: &[Bounds<Pixels>],
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mouse = window.mouse_position();
+        self.row_bounds = row_ids
+            .iter()
+            .cloned()
+            .zip(bounds.iter().copied())
+            .collect();
+        let hovered = self
+            .row_bounds
+            .iter()
+            .find(|(id, b)| id.is_some() && b.contains(&mouse))
+            .and_then(|(id, _)| id.clone());
+        if self.hovered_row != hovered {
+            self.hovered_row = hovered;
+            cx.notify();
+        }
+    }
+
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.collapsed = !self.collapsed;
         cx.global_mut::<Config>().sidebar_collapsed = self.collapsed;
@@ -649,6 +677,75 @@ impl Render for RootView {
             BREADCRUMBS_LEFT_SVG
         };
 
+        let mut rows: Vec<AnyElement> = Vec::with_capacity(self.notes.len() + 2);
+        let mut row_ids: Vec<Option<String>> = Vec::with_capacity(self.notes.len() + 2);
+        for (ix, note) in self
+            .notes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| !n.archived && self.note_matches(&n.id))
+        {
+            row_ids.push(Some(note.id.clone()));
+            rows.push(self.render_note_row(ix, note, &*cx).into_any_element());
+        }
+        let archived: Vec<_> = self
+            .notes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.archived && self.note_matches(&n.id))
+            .collect();
+        if !archived.is_empty() {
+            // 展开后此行保留,归档条目列在它下面
+            row_ids.push(None);
+            rows.push(
+                div()
+                    .id("archived-toggle")
+                    .px_4()
+                    .h(px(36.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .bg(t.sidebar_accent)
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(t.muted_foreground)
+                            .child(format!(
+                                "{} {} archived notes",
+                                if self.show_archived { "Hide" } else { "Show" },
+                                archived.len()
+                            )),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| this.toggle_archived_section(cx)),
+                    )
+                    .into_any_element(),
+            );
+            if self.show_archived {
+                // 深色竖条放进每行的包装里,行成为列表的直接子元素
+                for (ix, note) in archived {
+                    row_ids.push(Some(note.id.clone()));
+                    rows.push(
+                        h_flex()
+                            .w_full()
+                            .h(px(54.))
+                            .flex_shrink_0()
+                            .child(div().w(px(10.)).h_full().flex_shrink_0().bg(t.list_active))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(self.render_note_row(ix, note, &*cx).into_any_element()),
+                            )
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+        let rows_view = cx.entity().downgrade();
+
         let sidebar = v_flex()
             .w(px(if collapsed { RAIL_WIDTH } else { sidebar_width }))
             .h_full()
@@ -750,84 +847,19 @@ impl Render for RootView {
                         )
                         .child(
                             v_flex()
+                                .on_children_prepainted(move |bounds, window, cx| {
+                                    rows_view
+                                        .update(cx, |this, cx| {
+                                            this.reconcile_hovered_row(
+                                                &row_ids, &bounds, window, cx,
+                                            )
+                                        })
+                                        .ok();
+                                })
                                 .id("rows")
                                 .flex_1()
                                 .overflow_y_scrollbar()
-                                .children({
-                                    let mut rows: Vec<AnyElement> =
-                                        Vec::with_capacity(self.notes.len() + 2);
-                                    for (ix, note) in
-                                        self.notes.iter().enumerate().filter(|(_, n)| {
-                                            !n.archived && self.note_matches(&n.id)
-                                        })
-                                    {
-                                        rows.push(
-                                            self.render_note_row(ix, note, &*cx).into_any_element(),
-                                        );
-                                    }
-                                    let archived: Vec<_> = self
-                                        .notes
-                                        .iter()
-                                        .enumerate()
-                                        .filter(|(_, n)| n.archived && self.note_matches(&n.id))
-                                        .collect();
-                                    if !archived.is_empty() {
-                                        // 展开后此行保留,归档条目列在它下面
-                                        rows.push(
-                                            div()
-                                                .id("archived-toggle")
-                                                .px_4()
-                                                .h(px(36.))
-                                                .flex_shrink_0()
-                                                .flex()
-                                                .items_center()
-                                                .cursor_pointer()
-                                                .bg(t.sidebar_accent)
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(t.muted_foreground)
-                                                        .child(format!(
-                                                            "{} {} archived notes",
-                                                            if self.show_archived {
-                                                                "Hide"
-                                                            } else {
-                                                                "Show"
-                                                            },
-                                                            archived.len()
-                                                        )),
-                                                )
-                                                .on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(|this, _, _, cx| {
-                                                        this.toggle_archived_section(cx)
-                                                    }),
-                                                )
-                                                .into_any_element(),
-                                        );
-                                        if self.show_archived {
-                                            // 背景与列表一致,左边一条深色竖条标记归档区域
-                                            rows.push(
-                                                h_flex()
-                                                    .child(
-                                                        div()
-                                                            .w(px(10.))
-                                                            .h_full()
-                                                            .flex_shrink_0()
-                                                            .bg(t.list_active),
-                                                    )
-                                                    .child(v_flex().flex_1().min_w_0().children(
-                                                        archived.into_iter().map(|(ix, note)| {
-                                                            self.render_note_row(ix, note, &*cx)
-                                                                .into_any_element()
-                                                        }),
-                                                    ))
-                                                    .into_any_element(),
-                                            );
-                                        }
-                                    }
-                                    rows
-                                }),
+                                .children(rows),
                         ),
                 )
             });
@@ -1063,7 +1095,7 @@ mod tests {
     use crate::store::Store;
     use gpui_kit::component::WindowExt;
     use gpui_kit::{
-        AppContext, Entity, Focusable, TestAppContext, VisualTestContext, WindowOptions,
+        AppContext, Entity, Focusable, Modifiers, TestAppContext, VisualTestContext, WindowOptions,
     };
     use std::path::PathBuf;
     use std::time::Duration;
@@ -1348,6 +1380,41 @@ mod tests {
             view.update(cx, |this, cx| this.toggle_archived_section(cx));
             assert!(!view.read(cx).show_archived);
         });
+    }
+
+    #[test]
+    fn hover_follows_row_after_delete() {
+        let cx = &mut TestAppContext::single();
+        let dir = notes_dir("hover_after_delete");
+        let (view, cx) = harness(cx, &dir);
+        // B 创建在后,按最后编辑排序排在最上面一行
+        let note_a = cx.update(|_, cx| view.read(cx).current.clone().unwrap());
+        cx.dispatch_action(NewNote);
+        let note_b = cx.update(|_, cx| view.read(cx).current.clone().unwrap());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let point = cx.update(|_, cx| {
+            let this = view.read(cx);
+            assert_eq!(
+                this.notes.first().map(|n| n.id.as_str()),
+                Some(note_b.as_str())
+            );
+            let (_, bounds) = this
+                .row_bounds
+                .iter()
+                .find(|(id, _)| id.as_deref() == Some(note_b.as_str()))
+                .expect("note b row bounds");
+            bounds.center()
+        });
+        cx.simulate_mouse_move(point, None, Modifiers::none());
+        cx.cx.run_until_parked();
+        cx.update(|_, cx| assert_eq!(view.read(cx).hovered_row.as_deref(), Some(note_b.as_str())));
+        // 删除 B 后鼠标保持不动,A 上移进入鼠标下方
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| this.delete_note(&note_b, window, cx));
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.cx.run_until_parked();
+        cx.update(|_, cx| assert_eq!(view.read(cx).hovered_row.as_deref(), Some(note_a.as_str())));
     }
 
     #[test]
