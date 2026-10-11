@@ -10,6 +10,7 @@ gpui_kit::actions!(
         RenameNote,
         DeleteNote,
         SmartCut,
+        SmartCopy,
         DeleteLine,
         DuplicateLine,
         MoveLineUp,
@@ -35,6 +36,7 @@ pub fn bind(cx: &mut App) {
     // 在 Input 上下文覆盖编辑器默认绑定(后注册生效)
     cx.bind_keys([
         KeyBinding::new("cmd-x", SmartCut, Some("Input")),
+        KeyBinding::new("cmd-c", SmartCopy, Some("Input")),
         KeyBinding::new("cmd-shift-k", DeleteLine, Some("Input")),
         KeyBinding::new("cmd-shift-d", DuplicateLine, Some("Input")),
         KeyBinding::new("alt-up", MoveLineUp, Some("Input")),

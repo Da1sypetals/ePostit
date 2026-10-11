@@ -413,7 +413,12 @@ impl RootView {
             .rounded_md()
             .cursor_pointer()
             .hover(|s| s.bg(t.sidebar_accent))
-            .child(Icon::default().data(svg).size_4().text_color(t.foreground))
+            .child(
+                Icon::default()
+                    .data(svg)
+                    .size_3p5()
+                    .text_color(t.foreground),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -454,7 +459,7 @@ impl RootView {
         let delete_id = id.clone();
         h_flex()
             .id(("note", ix))
-            .px_3()
+            .px_4()
             .w_full()
             .h(px(54.))
             .flex_shrink_0()
@@ -613,8 +618,8 @@ impl Render for RootView {
                         .child(
                             h_flex()
                                 .id("sidebar-header")
-                                .px_3()
-                                .py_3()
+                                .px_4()
+                                .py_4()
                                 .items_center()
                                 .justify_between()
                                 .window_control_area(WindowControlArea::Drag)
@@ -644,7 +649,7 @@ impl Render for RootView {
                         )
                         .child(
                             h_flex()
-                                .px_3()
+                                .px_4()
                                 .pb_2()
                                 .items_center()
                                 .gap_2()
@@ -682,7 +687,7 @@ impl Render for RootView {
                                         rows.push(
                                             div()
                                                 .id("archived-toggle")
-                                                .px_3()
+                                                .px_4()
                                                 .h(px(36.))
                                                 .flex_shrink_0()
                                                 .flex()
@@ -694,7 +699,12 @@ impl Render for RootView {
                                                         .text_xs()
                                                         .text_color(t.muted_foreground)
                                                         .child(format!(
-                                                            "Show {} archived notes",
+                                                            "{} {} archived notes",
+                                                            if self.show_archived {
+                                                                "Hide"
+                                                            } else {
+                                                                "Show"
+                                                            },
                                                             archived.len()
                                                         )),
                                                 )
@@ -707,14 +717,21 @@ impl Render for RootView {
                                                 .into_any_element(),
                                         );
                                         if self.show_archived {
+                                            // 背景与列表一致,左边一条深色竖条标记归档区域
                                             rows.push(
-                                                v_flex()
-                                                    .bg(t.sidebar_accent)
-                                                    .children(archived.into_iter().map(
-                                                        |(ix, note)| {
+                                                h_flex()
+                                                    .child(
+                                                        div()
+                                                            .w(px(4.))
+                                                            .h_full()
+                                                            .flex_shrink_0()
+                                                            .bg(t.list_active),
+                                                    )
+                                                    .child(v_flex().flex_1().min_w_0().children(
+                                                        archived.into_iter().map(|(ix, note)| {
                                                             self.render_note_row(ix, note, &*cx)
                                                                 .into_any_element()
-                                                        },
+                                                        }),
                                                     ))
                                                     .into_any_element(),
                                             );
@@ -792,6 +809,9 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &SmartCut, window, cx| {
                 this.line_op(window, cx, LineOp::SmartCut)
             }))
+            .on_action(cx.listener(|this, _: &SmartCopy, window, cx| {
+                this.line_op(window, cx, LineOp::SmartCopy)
+            }))
             .on_action(cx.listener(|this, _: &DeleteLine, window, cx| {
                 this.line_op(window, cx, LineOp::DeleteLine)
             }))
@@ -814,6 +834,7 @@ impl Render for RootView {
 #[derive(Clone, Copy)]
 enum LineOp {
     SmartCut,
+    SmartCopy,
     DeleteLine,
     DuplicateLine,
     MoveLine(bool), // true = 上移
@@ -862,6 +883,18 @@ fn run_line_op<M: InputModeKind>(
             let copied = state.selected_text().to_string();
             cx.write_to_clipboard(ClipboardItem::new_string(copied));
             state.replace("", window, cx);
+        }
+        LineOp::SmartCopy => {
+            if state.selected_range().is_empty() {
+                // 无选区时复制整行(含行尾换行符),光标保持原位
+                state.set_selected_range(line_range(&starts, text.len(), line), cx);
+                let copied = state.selected_text().to_string();
+                state.set_selected_range(cursor..cursor, cx);
+                cx.write_to_clipboard(ClipboardItem::new_string(copied));
+            } else {
+                let copied = state.selected_text().to_string();
+                cx.write_to_clipboard(ClipboardItem::new_string(copied));
+            }
         }
         LineOp::DeleteLine => {
             let mut range = line_range(&starts, text.len(), line);
@@ -925,7 +958,7 @@ mod tests {
     use crate::config::Config;
     use crate::keymap::{
         DeleteLine, DeleteNote, DuplicateLine, MoveLineDown, MoveLineUp, NewNote, RenameNote,
-        SmartCut,
+        SmartCopy, SmartCut,
     };
     use crate::store::Store;
     use gpui_kit::component::WindowExt;
@@ -1248,6 +1281,30 @@ mod tests {
         assert_eq!(editor_value(&view, cx), "one\nthree");
         let item = cx.read_from_clipboard().expect("clipboard item");
         assert_eq!(item.text(), Some("two\n".to_string()));
+    }
+
+    #[test]
+    fn smart_copy_copies_line() {
+        let cx = &mut TestAppContext::single();
+        let dir = notes_dir("smart_copy");
+        let (view, cx) = harness(cx, &dir);
+        set_editor(&view, cx, "one\ntwo\nthree");
+        set_cursor(&view, cx, 4);
+        cx.dispatch_action(SmartCopy);
+        // 正文不动,剪贴板拿到整行
+        assert_eq!(editor_value(&view, cx), "one\ntwo\nthree");
+        let item = cx.read_from_clipboard().expect("clipboard item");
+        assert_eq!(item.text(), Some("two\n".to_string()));
+        // 有选区时按选区复制
+        cx.update(|_, cx| {
+            view.update(cx, |this, cx| {
+                this.editor
+                    .update(cx, |s, cx| s.set_selected_range(4..7, cx));
+            })
+        });
+        cx.dispatch_action(SmartCopy);
+        let item = cx.read_from_clipboard().expect("clipboard item");
+        assert_eq!(item.text(), Some("two".to_string()));
     }
 
     #[test]
