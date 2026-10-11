@@ -1281,14 +1281,14 @@ mod tests {
     ) -> (Entity<RootView>, &'a mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            crate::theme::apply(cx);
-            crate::keymap::bind(cx);
             cx.set_global(Config {
                 notes_dir: dir.clone(),
                 path: dir.join("config.toml"),
                 hide_on_blur: false,
                 ..Default::default()
             });
+            crate::theme::apply(cx);
+            crate::keymap::bind(cx);
         });
         let dir2 = dir.clone();
         let (handle, view) = cx.update(|cx| {

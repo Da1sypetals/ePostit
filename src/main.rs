@@ -153,14 +153,13 @@ fn main() {
     let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
     app.run(|cx| {
         gpui_kit::init(cx);
-        theme::apply(cx);
-        keymap::bind(cx);
-        disable_titlebar_double_click();
-
         let config = Config::load();
         std::fs::create_dir_all(&config.notes_dir).expect("create notes dir");
         let store = Store::new(config.notes_dir.clone());
         cx.set_global(config.clone());
+        theme::apply(cx);
+        keymap::bind(cx);
+        disable_titlebar_double_click();
 
         let (window, root) = gpui_kit::open_window(window_options(cx), cx, |window, cx| {
             hide_traffic_lights(window);

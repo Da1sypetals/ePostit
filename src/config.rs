@@ -35,6 +35,8 @@ pub struct Config {
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
     pub sort: SortMode,
+    /// theme.json 中的主题名:morganite、forest、dawn、nocturne
+    pub theme: String,
     /// 配置文件自身的路径,save 只写入该路径;
     /// 测试构造的实例可指向临时文件,避免写入真实配置
     #[serde(skip)]
@@ -53,6 +55,7 @@ impl Default for Config {
             sidebar_width: 240.,
             sidebar_collapsed: false,
             sort: SortMode::LastEdited,
+            theme: "morganite".into(),
             path: config_path(),
         }
     }

@@ -81,6 +81,7 @@ fn compose_hotkey(mod1: &str, mod2: Option<&str>, key: &str) -> Option<String> {
 
 pub struct SettingsView {
     launch_at_login: bool,
+    theme_select: Entity<SelectState<Vec<SharedString>>>,
     mod1: Entity<SelectState<Vec<SharedString>>>,
     mod2: Entity<SelectState<Vec<SharedString>>>,
     key_input: Entity<InputState>,
@@ -90,6 +91,20 @@ pub struct SettingsView {
 impl SettingsView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (mods, key) = split_combo(&cx.global::<Config>().hotkey);
+        let theme_index = crate::theme::THEME_CHOICES
+            .iter()
+            .position(|(id, _)| *id == cx.global::<Config>().theme)
+            .unwrap_or(0);
+        let theme_select = cx.new(|cx| {
+            SelectState::new(
+                crate::theme::THEME_CHOICES
+                    .map(|(_, label)| SharedString::from(label))
+                    .to_vec(),
+                Some(IndexPath::default().row(theme_index)),
+                window,
+                cx,
+            )
+        });
         let mod1 = cx.new(|cx| {
             SelectState::new(
                 MOD_LABELS.map(SharedString::from).to_vec(),
@@ -112,6 +127,11 @@ impl SettingsView {
                 .placeholder("Key")
         });
         let subscriptions = vec![
+            cx.subscribe_in(&theme_select, window, |this, _, ev, _, cx| {
+                if matches!(ev, SelectEvent::Confirm(_)) {
+                    this.apply_theme(cx);
+                }
+            }),
             cx.subscribe_in(&mod1, window, |this, _, ev, _, cx| {
                 if matches!(ev, SelectEvent::Confirm(_)) {
                     this.apply_hotkey(cx);
@@ -130,6 +150,7 @@ impl SettingsView {
         ];
         Self {
             launch_at_login: crate::login_item::is_enabled(),
+            theme_select,
             mod1,
             mod2,
             key_input,
@@ -159,6 +180,19 @@ impl SettingsView {
             .selected_value()
             .map(|v| v.to_string())
             .unwrap_or_default()
+    }
+
+    fn apply_theme(&mut self, cx: &mut Context<Self>) {
+        let label = self.selected_name(&self.theme_select, cx);
+        let Some((id, _)) = crate::theme::THEME_CHOICES
+            .iter()
+            .find(|(_, l)| *l == label.as_str())
+        else {
+            return;
+        };
+        cx.global_mut::<Config>().theme = id.to_string();
+        cx.global::<Config>().save();
+        crate::theme::set_theme(cx, id);
     }
 
     fn apply_hotkey(&mut self, cx: &mut Context<Self>) {
@@ -201,6 +235,18 @@ impl Render for SettingsView {
                         view.update(cx, |this, cx| this.toggle_login(*checked, cx))
                             .ok();
                     }),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().text_sm().child("Theme"))
+                    .child(
+                        div()
+                            .w(px(120.))
+                            .flex_shrink_0()
+                            .child(Select::new(&self.theme_select).small()),
+                    ),
             )
             .child(
                 h_flex()
@@ -284,6 +330,7 @@ mod tests {
     }
 
     use crate::config::Config;
+    use gpui_kit::component::ActiveTheme;
     use gpui_kit::{
         AppContext, Entity, Focusable, TestAppContext, VisualTestContext, WindowOptions,
     };
@@ -303,13 +350,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         cx.update(|cx| {
             gpui_kit::init(cx);
-            crate::theme::apply(cx);
-            crate::keymap::bind(cx);
             cx.set_global(Config {
                 hotkey: hotkey.to_string(),
                 path: dir.join("config.toml"),
                 ..Default::default()
             });
+            crate::theme::apply(cx);
+            crate::keymap::bind(cx);
         });
         let (handle, view) = cx.update(|cx| {
             gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
@@ -370,5 +417,26 @@ mod tests {
         // 新键必须持久化到该实例自己的配置文件,重新读取能拿到同样的值
         let saved = Config::load_from(&config_dir("rebind").join("config.toml"));
         assert_eq!(saved.hotkey, "cmd+alt+k");
+    }
+
+    #[test]
+    fn theme_select_switches_immediately_and_persists() {
+        let cx = &mut TestAppContext::single();
+        let (view, cx) = harness(cx, "theme", "cmd-n");
+        let morganite_bg = cx.update(|_, cx| cx.theme().background);
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.theme_select.update(cx, |s, cx| {
+                    s.set_selected_index(Some(IndexPath::default().row(1)), window, cx);
+                });
+                this.apply_theme(cx);
+            });
+        });
+        cx.update(|_, cx| {
+            assert_eq!(cx.global::<Config>().theme, "forest");
+            assert_ne!(cx.theme().background, morganite_bg);
+        });
+        let saved = Config::load_from(&config_dir("theme").join("config.toml"));
+        assert_eq!(saved.theme, "forest");
     }
 }
