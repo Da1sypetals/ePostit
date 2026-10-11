@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::keymap::SETTINGS_CONTEXT;
 use gpui_kit::base::IndexPath;
+use gpui_kit::base::StyledExt;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
@@ -193,6 +194,7 @@ impl Render for SettingsView {
             .font(crate::theme::app_font())
             .p_5()
             .gap_5()
+            .child(div().text_lg().font_semibold().child("Settings"))
             .child(
                 Checkbox::new("launch-at-login")
                     .label("Launch at login")
