@@ -1,0 +1,23 @@
+[package]
+name = "epostit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+async-channel = "2.5.0"
+block2 = "0.6.2"
+chrono = "0.4.45"
+dirs = "7.0.0"
+global-hotkey = "0.8.0"
+gpui-kit = { version = "0.7.1", features = ["tree-sitter-markdown", "test-support"] }
+muda = "0.21.2"
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", features = ["NSRunningApplication"] }
+objc2-foundation = "0.3.2"
+raw-window-handle = "0.6"
+serde = "1.0.229"
+serde_yml = "0.0.13"
+toml = "1.1.8"
+tray-icon = "0.26.1"
+ulid = "3.0.0"

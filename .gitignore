@@ -1,0 +1,8 @@
+.research/
+target/
+
+
+# Added by cargo
+
+/target
+logs/
