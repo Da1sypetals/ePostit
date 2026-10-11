@@ -9,6 +9,7 @@ use gpui_kit::component::Sizable;
 use gpui_kit::component::input::{
     AnyInputState, Editor, EditorState, Input, InputEvent, InputState,
 };
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::{ActiveTheme, Icon, WindowExt, h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -255,6 +256,17 @@ impl RootView {
         cx.notify();
     }
 
+    /// 退出改名状态,标题保持不变
+    fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.renaming.is_none() {
+            return;
+        }
+        self.renaming = None;
+        self.rename_input = None;
+        self.list_focus.focus(window, cx);
+        cx.notify();
+    }
+
     fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.renaming.take() else {
             return;
@@ -350,25 +362,46 @@ impl RootView {
         v_flex()
             .id(("note", ix))
             .px_3()
-            .py_2()
             .w_full()
+            .h(px(54.))
+            .flex_shrink_0()
             .gap_0p5()
+            .justify_center()
             .cursor_pointer()
             .when(selected, |this| this.bg(t.list_active))
             .when(!selected, |this| this.hover(|s| s.bg(t.list_hover)))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    this.open_note(&id, window, cx);
-                    this.list_focus.focus(window, cx);
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    if event.click_count >= 2 {
+                        this.begin_rename(window, cx);
+                    } else {
+                        this.open_note(&id, window, cx);
+                        this.list_focus.focus(window, cx);
+                    }
                 }),
             )
             .map(|this| {
                 if renaming {
                     let input = rename_input.unwrap();
-                    this.child(Input::new(&input).w_full())
+                    this.child(
+                        div()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .child(Input::new(&input).w_full()),
+                    )
                 } else {
-                    this.child(div().text_sm().child(note.title.clone())).child(
+                    this.child(
+                        div()
+                            .text_sm()
+                            .w_full()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(note.title.clone()),
+                    )
+                    .child(
                         div()
                             .text_xs()
                             .text_color(t.muted_foreground)
@@ -481,7 +514,7 @@ impl Render for RootView {
                                 )
                                 .child(Select::new(&self.sort).small().w(px(128.))),
                         )
-                        .child(v_flex().id("rows").flex_1().overflow_y_scroll().children({
+                        .child(v_flex().id("rows").flex_1().overflow_y_scrollbar().children({
                             let mut rows = Vec::with_capacity(self.notes.len());
                             for (ix, note) in self.notes.iter().enumerate() {
                                 rows.push(self.render_note_row(ix, note, &*cx));
@@ -530,7 +563,14 @@ impl Render for RootView {
             .bg(t.background)
             .text_color(t.foreground)
             .font(crate::theme::app_font())
-            .on_action(cx.listener(|this, _: &HideApp, _, cx| this.hide(cx)))
+            .on_action(cx.listener(|this, _: &HideApp, window, cx| {
+                // 有可退出的状态时先退出状态,下一次 Escape 才隐藏窗口
+                if this.renaming.is_some() {
+                    this.cancel_rename(window, cx);
+                } else {
+                    this.hide(cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &NewNote, window, cx| this.create_note(window, cx)))
             .on_action(cx.listener(|this, _: &QuitApp, _, cx| {
                 this.flush_save(cx);
@@ -820,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn escape_while_renaming_hides() {
+    fn escape_while_renaming_cancels_then_hides() {
         let cx = &mut TestAppContext::single();
         let dir = notes_dir("escape_rename");
         let (view, cx) = harness(cx, &dir);
@@ -832,8 +872,10 @@ mod tests {
         cx.update(|_, cx| assert!(view.read(cx).renaming.is_some()));
         let before = crate::hide_count();
         cx.simulate_keystrokes("escape");
-        assert!(crate::hide_count() >= before + 1);
         cx.update(|_, cx| assert!(view.read(cx).renaming.is_none()));
+        assert_eq!(crate::hide_count(), before);
+        cx.simulate_keystrokes("escape");
+        assert!(crate::hide_count() >= before + 1);
     }
 
     #[test]

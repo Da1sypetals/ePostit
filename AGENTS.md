@@ -85,3 +85,7 @@ I am completely NOT interested in "what does not work". Do not reply me with suc
 在任何思考、回复、文档里面不允许出现"That's a lot", "This is a substantial rewrite"等对工作量的评判。你只是一个工具，就像计算器不会评价要计算的数太大了一样，你没有资格评判工作量。你没有资格把你自己当做我的同事。禁止简化任何设计。
 
 严禁使用subagent，包括任何任务。
+
+## 项目
+
+如果需要添加一个SVG图标的话，这个图标应该使用和现在项目里面相契合的主题色，而不是直接使用原本SVG里面的颜色

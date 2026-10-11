@@ -20,8 +20,9 @@ gpui_kit::actions!(
 pub const APP_CONTEXT: &str = "Epostit";
 pub const LIST_CONTEXT: &str = "NoteList";
 
-/// 应用自身上下文加上输入/列表/菜单的上下文
-const CONTEXTS: [&str; 4] = [APP_CONTEXT, LIST_CONTEXT, "Input", "List"];
+/// 应用自身上下文加上列表/菜单的上下文。编辑器 Escape 由编辑器自身分层处理:
+/// 先退出搜索、多光标等状态,无可退出状态时向上传播到 APP_CONTEXT
+const CONTEXTS: [&str; 3] = [APP_CONTEXT, LIST_CONTEXT, "List"];
 
 pub fn bind(cx: &mut App) {
     for ctx in CONTEXTS {
