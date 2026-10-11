@@ -89,3 +89,5 @@ I am completely NOT interested in "what does not work". Do not reply me with suc
 ## 项目
 
 如果需要添加一个SVG图标的话，这个图标应该使用和现在项目里面相契合的主题色，而不是直接使用原本SVG里面的颜色
+
+所有bug**先复现找到确定性问题再修复**，不要瞎鸡巴修一个地方然后就claim“我修复了我真牛b”

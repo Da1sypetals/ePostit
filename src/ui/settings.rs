@@ -1,5 +1,4 @@
 use crate::config::Config;
-use crate::keymap::SETTINGS_CONTEXT;
 use gpui_kit::base::IndexPath;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::checkbox::Checkbox;
@@ -187,7 +186,6 @@ impl Render for SettingsView {
         let t = cx.theme();
         let view = cx.entity().downgrade();
         v_flex()
-            .key_context(SETTINGS_CONTEXT)
             .size_full()
             .bg(t.background)
             .text_color(t.foreground)

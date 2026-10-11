@@ -16,13 +16,11 @@ gpui_kit::actions!(
         DuplicateLine,
         MoveLineUp,
         MoveLineDown,
-        CloseSettings,
     ]
 );
 
 pub const APP_CONTEXT: &str = "Epostit";
 pub const LIST_CONTEXT: &str = "NoteList";
-pub const SETTINGS_CONTEXT: &str = "Settings";
 
 /// 应用自身上下文加上列表/菜单的上下文。编辑器 Escape 由编辑器自身分层处理:
 /// 先退出搜索、多光标等状态,无可退出状态时向上传播到 APP_CONTEXT
@@ -51,10 +49,4 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("cmd-backspace", DeleteNote, Some(LIST_CONTEXT)),
     ]);
     cx.bind_keys([KeyBinding::new("cmd-b", ToggleSidebar, Some(APP_CONTEXT))]);
-    // 设置窗口的 Escape 关闭
-    cx.bind_keys([KeyBinding::new(
-        "escape",
-        CloseSettings,
-        Some(SETTINGS_CONTEXT),
-    )]);
 }

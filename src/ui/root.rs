@@ -204,7 +204,9 @@ impl RootView {
     /// 切换笔记:先保存当前,再载入目标正文;设置面板随之退出,
     /// 点的就是当前笔记时同样退出面板回到编辑器
     fn open_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings = None;
+        if self.settings.take().is_some() {
+            self.focus_editor(window, cx);
+        }
         if self.current.as_deref() == Some(id) {
             cx.notify();
             return;
@@ -220,7 +222,9 @@ impl RootView {
     }
 
     pub fn create_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings = None;
+        if self.settings.take().is_some() {
+            self.focus_editor(window, cx);
+        }
         self.flush_save(cx);
         let note = self.store.create();
         let id = note.id.clone();
@@ -337,16 +341,19 @@ impl RootView {
         cx.notify();
     }
 
-    /// 退出设置面板回到编辑器,焦点还给编辑器
-    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings = None;
-        self.focus_editor(window, cx);
-        cx.notify();
-    }
-
     pub fn focus_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
         let focus = self.editor.read(cx).focus_handle(cx).clone();
         focus.focus(window, cx);
+    }
+
+    /// 唤起时聚焦当前面板:设置打开时编辑器不在树上,
+    /// 聚焦它的 FocusHandle 会让按键无处派发
+    pub fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_some() {
+            self.list_focus.focus(window, cx);
+        } else {
+            self.focus_editor(window, cx);
+        }
     }
 
     fn begin_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -998,11 +1005,6 @@ impl Render for RootView {
                     .id("settings-pane")
                     .h_full()
                     .w_full()
-                    // 面板内焦点命中 SETTINGS_CONTEXT 的 Escape 绑定,
-                    // 动作冒泡到这里统一关闭
-                    .on_action(cx.listener(|this, _: &CloseSettings, window, cx| {
-                        this.close_settings(window, cx);
-                    }))
                     .child(settings)
                     .into_any_element()
             } else {
@@ -1035,8 +1037,6 @@ impl Render for RootView {
                 // 有可退出的状态时先退出状态,下一次 Escape 才隐藏窗口
                 if this.renaming.is_some() {
                     this.cancel_rename(window, cx);
-                } else if this.settings.is_some() {
-                    this.close_settings(window, cx);
                 } else {
                     this.hide(cx);
                 }
@@ -1405,7 +1405,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_replaces_editor_and_escape_returns() {
+    fn settings_is_view_state_escape_hides() {
         let cx = &mut TestAppContext::single();
         let dir = notes_dir("settings_pane");
         let (view, cx) = harness(cx, &dir);
@@ -1413,12 +1413,28 @@ mod tests {
             view.update(cx, |this, cx| this.open_settings(window, cx));
         });
         cx.update(|_, cx| assert!(view.read(cx).settings.is_some()));
-        // 第一次 Escape 关闭面板回到编辑器,第二次才隐藏窗口
-        cx.simulate_keystrokes("escape");
-        cx.update(|_, cx| assert!(view.read(cx).settings.is_none()));
-        cx.update(|_, cx| assert_eq!(view.read(cx).hide_requests, 0));
+        // 设置只是编辑器区域的内容,Escape 直接隐藏窗口
         cx.simulate_keystrokes("escape");
         cx.update(|_, cx| assert_eq!(view.read(cx).hide_requests, 1));
+    }
+
+    #[test]
+    fn wake_with_settings_open_keeps_escape_working() {
+        let cx = &mut TestAppContext::single();
+        let dir = notes_dir("settings_wake");
+        let (view, cx) = harness(cx, &dir);
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| this.open_settings(window, cx));
+        });
+        // 设置打开时 Escape 隐藏,设置作为视图状态保留
+        cx.simulate_keystrokes("escape");
+        cx.update(|_, cx| assert_eq!(view.read(cx).hide_requests, 1));
+        // 唤起时 show_window 聚焦当前面板
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| this.focus_active(window, cx));
+        });
+        cx.simulate_keystrokes("escape");
+        cx.update(|_, cx| assert_eq!(view.read(cx).hide_requests, 2));
     }
 
     #[test]

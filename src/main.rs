@@ -72,7 +72,7 @@ pub fn show_window(cx: &mut App) {
             window.activate_window();
         }
         if let Some(root) = shared_root(cx) {
-            root.update(cx, |r, cx| r.focus_editor(window, cx));
+            root.update(cx, |r, cx| r.focus_active(window, cx));
         }
     });
 }
