@@ -6,6 +6,7 @@ use chrono::{DateTime, Local};
 use gpui_kit::base::IndexPath;
 use gpui_kit::base::input::{InputBaseState, InputModeKind};
 use gpui_kit::component::Sizable;
+use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::input::{
     AnyInputState, Editor, EditorState, Input, InputEvent, InputState,
 };
@@ -20,6 +21,9 @@ use std::time::Duration;
 const EDIT_SVG: &[u8] = include_bytes!("../../assets/icons/edit.svg");
 const BREADCRUMBS_SVG: &[u8] = include_bytes!("../../assets/icons/breadcrumbs.svg");
 const BREADCRUMBS_LEFT_SVG: &[u8] = include_bytes!("../../assets/icons/breadcrumbs-left.svg");
+const ARCHIVE_SVG: &[u8] = include_bytes!("../../assets/icons/archive.svg");
+const UNARCHIVE_SVG: &[u8] = include_bytes!("../../assets/icons/unarchive.svg");
+const DELETE_SVG: &[u8] = include_bytes!("../../assets/icons/delete.svg");
 const RAIL_WIDTH: f32 = 48.;
 
 pub struct RootView {
@@ -33,6 +37,8 @@ pub struct RootView {
     collapsed: bool,
     renaming: Option<String>,
     rename_input: Option<Entity<InputState>>,
+    show_archived: bool,
+    hovered_row: Option<String>,
     dirty: bool,
     save_gen: u64,
     window_active: bool,
@@ -89,6 +95,8 @@ impl RootView {
             collapsed: cx.global::<Config>().sidebar_collapsed,
             renaming: None,
             rename_input: None,
+            show_archived: false,
+            hovered_row: None,
             dirty: false,
             save_gen: 0,
             window_active: window.is_window_active(),
@@ -240,6 +248,9 @@ impl RootView {
         let Some(id) = self.current.clone() else {
             return;
         };
+        if self.note(&id).is_some_and(|n| n.archived) {
+            return;
+        }
         let title = self.note(&id).expect("rename note").title.clone();
         let input = cx.new(|cx| InputState::new(window, cx).default_value(title));
         input.update(cx, |s, cx| s.select_all(window, cx));
@@ -291,19 +302,71 @@ impl RootView {
         cx.notify();
     }
 
-    fn delete_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.current.clone() else {
+    /// 归档切换只改写 front matter;当前笔记被归档后编辑器锁定
+    fn toggle_archive(&mut self, id: &str, cx: &mut Context<Self>) {
+        let store = &self.store;
+        let note = self
+            .notes
+            .iter_mut()
+            .find(|n| n.id == id)
+            .expect("archive note");
+        let archived = !note.archived;
+        store.set_archived(note, archived);
+        cx.notify();
+    }
+
+    /// 归档笔记直接删除,普通笔记先弹确认框
+    fn request_delete(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let note = self.note(id).expect("delete note");
+        if note.archived {
+            self.delete_note(id, window, cx);
             return;
-        };
-        let note = self.note(&id).expect("delete note").clone();
+        }
+        let title = note.title.clone();
+        let view = cx.entity();
+        let id = id.to_string();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let view = view.clone();
+            let id = id.clone();
+            alert
+                .title("Delete note?")
+                .description(format!("\"{title}\" will be moved to trash."))
+                .show_cancel(true)
+                .ok_text("Delete")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    view.update(cx, |this, cx| this.delete_note(&id, window, cx));
+                    true
+                })
+        });
+    }
+
+    fn delete_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let note = self.note(id).expect("delete note").clone();
         self.store.trash(&note);
         self.notes.retain(|n| n.id != id);
-        self.current = None;
-        let next = self.notes.first().map(|n| n.id.clone());
-        match next {
-            Some(id) => self.open_note(&id, window, cx),
-            None => self.create_note(window, cx),
+        if self.renaming.as_deref() == Some(id) {
+            self.renaming = None;
+            self.rename_input = None;
         }
+        if self.current.as_deref() == Some(id) {
+            self.current = None;
+            let next = self
+                .notes
+                .iter()
+                .find(|n| !n.archived)
+                .map(|n| n.id.clone());
+            match next {
+                Some(id) => self.open_note(&id, window, cx),
+                None => self.create_note(window, cx),
+            }
+        }
+        cx.notify();
+    }
+
+    fn toggle_archived_section(&mut self, cx: &mut Context<Self>) {
+        self.show_archived = !self.show_archived;
+        cx.notify();
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -335,6 +398,31 @@ impl RootView {
             )
     }
 
+    /// 条目内悬停显示的操作按钮,点击不向下冒泡到条目
+    fn row_button(
+        &self,
+        id: impl Into<ElementId>,
+        svg: &'static [u8],
+        on: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let t = cx.theme();
+        div()
+            .id(id)
+            .p_1()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|s| s.bg(t.sidebar_accent))
+            .child(Icon::default().data(svg).size_4().text_color(t.foreground))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    on(this, window, cx);
+                }),
+            )
+    }
+
     /// 对当前聚焦的输入组件执行整行操作
     fn line_op(&mut self, window: &mut Window, cx: &mut Context<Self>, op: LineOp) {
         let Some(input) = window.focused_input(cx) else {
@@ -356,17 +444,21 @@ impl RootView {
     ) -> impl IntoElement + 'static {
         let t = cx.theme();
         let id = note.id.clone();
+        let archived = note.archived;
+        let hovered = self.hovered_row.as_deref() == Some(note.id.as_str());
         let selected = self.current.as_deref() == Some(note.id.as_str());
         let renaming = self.renaming.as_deref() == Some(note.id.as_str());
         let rename_input = self.rename_input.clone();
-        v_flex()
+        let hover_id = id.clone();
+        let archive_id = id.clone();
+        let delete_id = id.clone();
+        h_flex()
             .id(("note", ix))
             .px_3()
             .w_full()
             .h(px(54.))
             .flex_shrink_0()
-            .gap_0p5()
-            .justify_center()
+            .items_center()
             .cursor_pointer()
             .when(selected, |this| this.bg(t.list_active))
             .when(!selected, |this| this.hover(|s| s.bg(t.list_hover)))
@@ -381,11 +473,20 @@ impl RootView {
                     }
                 }),
             )
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                let was = this.hovered_row.as_deref() == Some(hover_id.as_str());
+                if *hovered != was {
+                    this.hovered_row = hovered.then(|| hover_id.clone());
+                    cx.notify();
+                }
+            }))
             .map(|this| {
                 if renaming {
                     let input = rename_input.unwrap();
                     this.child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .h_full()
                             .flex()
                             .items_center()
@@ -393,20 +494,49 @@ impl RootView {
                     )
                 } else {
                     this.child(
-                        div()
-                            .text_sm()
-                            .w_full()
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(note.title.clone()),
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .w_full()
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(note.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(t.muted_foreground)
+                                    .child(rel_time(note.modified)),
+                            ),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(t.muted_foreground)
-                            .child(rel_time(note.modified)),
-                    )
+                    .when(hovered, |this| {
+                        this.child(
+                            h_flex()
+                                .flex_shrink_0()
+                                .gap_1()
+                                .items_center()
+                                .child(self.row_button(
+                                    ("archive", ix),
+                                    if archived { UNARCHIVE_SVG } else { ARCHIVE_SVG },
+                                    move |this, _, cx| this.toggle_archive(&archive_id, cx),
+                                    cx,
+                                ))
+                                .child(self.row_button(
+                                    ("delete", ix),
+                                    DELETE_SVG,
+                                    move |this, window, cx| {
+                                        this.request_delete(&delete_id, window, cx)
+                                    },
+                                    cx,
+                                )),
+                        )
+                    })
                 }
             })
     }
@@ -460,12 +590,18 @@ impl Render for RootView {
                     .pt_3()
                     .gap_2()
                     .window_control_area(WindowControlArea::Drag)
-                    .child(self.icon_button("new-note", EDIT_SVG, |this, window, cx| {
-                        this.create_note(window, cx)
-                    }, cx))
-                    .child(self.icon_button("toggle-sidebar", toggle_icon, |this, _, cx| {
-                        this.toggle_sidebar(cx)
-                    }, cx))
+                    .child(self.icon_button(
+                        "new-note",
+                        EDIT_SVG,
+                        |this, window, cx| this.create_note(window, cx),
+                        cx,
+                    ))
+                    .child(self.icon_button(
+                        "toggle-sidebar",
+                        toggle_icon,
+                        |this, _, cx| this.toggle_sidebar(cx),
+                        cx,
+                    ))
             })
             .when(!collapsed, |this| {
                 this.child(
@@ -492,12 +628,18 @@ impl Render for RootView {
                                     h_flex()
                                         .gap_1()
                                         .items_center()
-                                        .child(self.icon_button("new-note", EDIT_SVG, |this, window, cx| {
-                                            this.create_note(window, cx)
-                                        }, cx))
-                                        .child(self.icon_button("toggle-sidebar", toggle_icon, |this, _, cx| {
-                                            this.toggle_sidebar(cx)
-                                        }, cx)),
+                                        .child(self.icon_button(
+                                            "new-note",
+                                            EDIT_SVG,
+                                            |this, window, cx| this.create_note(window, cx),
+                                            cx,
+                                        ))
+                                        .child(self.icon_button(
+                                            "toggle-sidebar",
+                                            toggle_icon,
+                                            |this, _, cx| this.toggle_sidebar(cx),
+                                            cx,
+                                        )),
                                 ),
                         )
                         .child(
@@ -514,16 +656,82 @@ impl Render for RootView {
                                 )
                                 .child(Select::new(&self.sort).small().w(px(128.))),
                         )
-                        .child(v_flex().id("rows").flex_1().overflow_y_scrollbar().children({
-                            let mut rows = Vec::with_capacity(self.notes.len());
-                            for (ix, note) in self.notes.iter().enumerate() {
-                                rows.push(self.render_note_row(ix, note, &*cx));
-                            }
-                            rows
-                        })),
+                        .child(
+                            v_flex()
+                                .id("rows")
+                                .flex_1()
+                                .overflow_y_scrollbar()
+                                .children({
+                                    let mut rows: Vec<AnyElement> =
+                                        Vec::with_capacity(self.notes.len() + 2);
+                                    for (ix, note) in
+                                        self.notes.iter().enumerate().filter(|(_, n)| !n.archived)
+                                    {
+                                        rows.push(
+                                            self.render_note_row(ix, note, &*cx).into_any_element(),
+                                        );
+                                    }
+                                    let archived: Vec<_> = self
+                                        .notes
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(_, n)| n.archived)
+                                        .collect();
+                                    if !archived.is_empty() {
+                                        // 展开后此行保留,归档条目列在它下面
+                                        rows.push(
+                                            div()
+                                                .id("archived-toggle")
+                                                .px_3()
+                                                .h(px(36.))
+                                                .flex_shrink_0()
+                                                .flex()
+                                                .items_center()
+                                                .cursor_pointer()
+                                                .bg(t.sidebar_accent)
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(t.muted_foreground)
+                                                        .child(format!(
+                                                            "Show {} archived notes",
+                                                            archived.len()
+                                                        )),
+                                                )
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(|this, _, _, cx| {
+                                                        this.toggle_archived_section(cx)
+                                                    }),
+                                                )
+                                                .into_any_element(),
+                                        );
+                                        if self.show_archived {
+                                            rows.push(
+                                                v_flex()
+                                                    .bg(t.sidebar_accent)
+                                                    .children(archived.into_iter().map(
+                                                        |(ix, note)| {
+                                                            self.render_note_row(ix, note, &*cx)
+                                                                .into_any_element()
+                                                        },
+                                                    ))
+                                                    .into_any_element(),
+                                            );
+                                        }
+                                    }
+                                    rows
+                                }),
+                        ),
                 )
             });
 
+        // Editor 元素每帧把 disabled 写回状态,锁定标记由渲染驱动
+        let editor_disabled = self
+            .current
+            .as_ref()
+            .and_then(|id| self.note(id))
+            .is_some_and(|n| n.archived);
         let editor_area = div()
             .relative()
             .flex_1()
@@ -540,20 +748,16 @@ impl Render for RootView {
                     .window_control_area(WindowControlArea::Drag),
             )
             .child(
-                div()
-                    .h_full()
-                    .w_full()
-                    .px_4()
-                    .pt_4()
-                    .child(
-                        Editor::new(&self.editor)
-                            .h_full()
-                            .w_full()
-                            .bordered(false)
-                            .appearance(false)
-                            .font(crate::theme::app_font())
-                            .text_size(px(15.)),
-                    ),
+                div().h_full().w_full().px_4().pt_4().child(
+                    Editor::new(&self.editor)
+                        .h_full()
+                        .w_full()
+                        .bordered(false)
+                        .appearance(false)
+                        .disabled(editor_disabled)
+                        .font(crate::theme::app_font())
+                        .text_size(px(15.)),
+                ),
             );
 
         h_flex()
@@ -580,9 +784,11 @@ impl Render for RootView {
             .on_action(
                 cx.listener(|this, _: &RenameNote, window, cx| this.begin_rename(window, cx)),
             )
-            .on_action(
-                cx.listener(|this, _: &DeleteNote, window, cx| this.delete_current(window, cx)),
-            )
+            .on_action(cx.listener(|this, _: &DeleteNote, window, cx| {
+                if let Some(id) = this.current.clone() {
+                    this.request_delete(&id, window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &SmartCut, window, cx| {
                 this.line_op(window, cx, LineOp::SmartCut)
             }))
@@ -722,6 +928,7 @@ mod tests {
         SmartCut,
     };
     use crate::store::Store;
+    use gpui_kit::component::WindowExt;
     use gpui_kit::{AppContext, Entity, TestAppContext, VisualTestContext, WindowOptions};
     use std::path::PathBuf;
     use std::time::Duration;
@@ -888,10 +1095,124 @@ mod tests {
             view.update(cx, |this, cx| this.list_focus.focus(window, cx));
         });
         let removed = cx.update(|_, cx| view.read(cx).current.clone().unwrap());
-        cx.dispatch_action(DeleteNote);
+        // 确认按钮走的就是 delete_note
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| this.delete_note(&removed, window, cx));
+        });
         assert!(!dir.join(format!("{removed}.md")).exists());
         assert!(dir.join(".trash").join(format!("{removed}.md")).exists());
         cx.update(|_, cx| assert_eq!(view.read(cx).notes.len(), 1));
+    }
+
+    #[test]
+    fn archive_toggle_writes_front_matter() {
+        let cx = &mut TestAppContext::single();
+        let dir = notes_dir("archive_toggle");
+        let (view, cx) = harness(cx, &dir);
+        let id = cx.update(|_, cx| view.read(cx).current.clone().unwrap());
+        cx.update(|_, cx| {
+            view.update(cx, |this, cx| this.toggle_archive(&id, cx));
+        });
+        cx.update(|_, cx| assert!(view.read(cx).note(&id).unwrap().archived));
+        assert!(note_files(&dir)[0].1.contains("archived: true"));
+        cx.update(|_, cx| {
+            view.update(cx, |this, cx| this.toggle_archive(&id, cx));
+        });
+        cx.update(|_, cx| assert!(!view.read(cx).note(&id).unwrap().archived));
+        assert!(note_files(&dir)[0].1.contains("archived: false"));
+    }
+
+    #[test]
+    fn archived_note_is_readonly() {
+        let cx = &mut TestAppContext::single();
+        let dir = notes_dir("archived_readonly");
+        let (view, cx) = harness(cx, &dir);
+        set_editor(&view, cx, "archived body");
+        cx.update(|_, cx| {
+            view.update(cx, |this, cx| this.dirty = false);
+        });
+        let id = cx.update(|_, cx| view.read(cx).current.clone().unwrap());
+        cx.update(|_, cx| {
+            view.update(cx, |this, cx| this.toggle_archive(&id, cx));
+        });
+        // disabled 由 Editor 元素渲染时写回状态
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|_, cx| {
+            assert!(!view.read(cx).editor.read(cx).is_editable());
+        });
+        cx.simulate_input("no edits");
+        assert_eq!(editor_value(&view, cx), "archived body");
+        // 归档笔记不允许改名
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| this.begin_rename(window, cx));
+        });
+        cx.update(|_, cx| assert!(view.read(cx).renaming.is_none()));
+        cx.update(|_, cx| {
+            view.update(cx, |this, cx| this.toggle_archive(&id, cx));
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|_, cx| {
+            assert!(view.read(cx).editor.read(cx).is_editable());
+        });
+    }
+
+    #[test]
+    fn archived_note_deletes_without_dialog() {
+        let cx = &mut TestAppContext::single();
+        let dir = notes_dir("archived_delete");
+        let (view, cx) = harness(cx, &dir);
+        let id = cx.update(|_, cx| view.read(cx).current.clone().unwrap());
+        cx.update(|_, cx| {
+            view.update(cx, |this, cx| this.toggle_archive(&id, cx));
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| this.request_delete(&id, window, cx));
+        });
+        assert!(dir.join(".trash").join(format!("{id}.md")).exists());
+        cx.update(|window, cx| assert!(!window.has_active_dialog(cx)));
+        cx.update(|_, cx| assert!(view.read(cx).notes.iter().all(|n| n.id != id)));
+    }
+
+    #[test]
+    fn active_note_delete_opens_dialog() {
+        let cx = &mut TestAppContext::single();
+        let dir = notes_dir("active_delete_dialog");
+        let (view, cx) = harness(cx, &dir);
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| this.list_focus.focus(window, cx));
+        });
+        let id = cx.update(|_, cx| view.read(cx).current.clone().unwrap());
+        cx.dispatch_action(DeleteNote);
+        cx.update(|window, cx| assert!(window.has_active_dialog(cx)));
+        // 确认前笔记不动
+        assert!(dir.join(format!("{id}.md")).exists());
+        cx.update(|_, cx| assert!(view.read(cx).note(&id).is_some()));
+        cx.update(|window, cx| window.close_all_dialogs(cx));
+    }
+
+    #[test]
+    fn archived_section_expand_collapse() {
+        let cx = &mut TestAppContext::single();
+        let dir = notes_dir("archived_section");
+        let (view, cx) = harness(cx, &dir);
+        let id = cx.update(|_, cx| view.read(cx).current.clone().unwrap());
+        cx.dispatch_action(NewNote);
+        cx.update(|_, cx| {
+            view.update(cx, |this, cx| this.toggle_archive(&id, cx));
+        });
+        cx.update(|_, cx| {
+            let this = view.read(cx);
+            assert!(!this.show_archived);
+            assert_eq!(this.notes.iter().filter(|n| n.archived).count(), 1);
+        });
+        cx.update(|_, cx| {
+            view.update(cx, |this, cx| this.toggle_archived_section(cx));
+        });
+        cx.update(|_, cx| {
+            assert!(view.read(cx).show_archived);
+            view.update(cx, |this, cx| this.toggle_archived_section(cx));
+            assert!(!view.read(cx).show_archived);
+        });
     }
 
     #[test]

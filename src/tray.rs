@@ -21,9 +21,7 @@ pub fn install(cx: &mut App) {
         ID_OPEN,
         "Open Storage Folder",
         true,
-        Some(
-            MenuIcon::from_rgba(FINDER_RGBA.to_vec(), 32, 32).expect("finder menu icon"),
-        ),
+        Some(MenuIcon::from_rgba(FINDER_RGBA.to_vec(), 32, 32).expect("finder menu icon")),
         None,
     );
     let item_quit = PredefinedMenuItem::quit(Some("Quit ePostit"));

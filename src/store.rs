@@ -9,6 +9,8 @@ use ulid::Ulid;
 struct FrontMatter {
     title: String,
     created: DateTime<Local>,
+    #[serde(default)]
+    archived: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -17,6 +19,7 @@ pub struct Note {
     pub title: String,
     pub created: DateTime<Local>,
     pub modified: DateTime<Local>,
+    pub archived: bool,
     pub path: PathBuf,
 }
 
@@ -47,17 +50,20 @@ impl Store {
             let meta = fs::metadata(&path).expect("note metadata");
             let modified = meta.modified().map(to_local).expect("note mtime");
             let text = fs::read_to_string(&path).expect("read note");
-            let (title, created) = match split_front_matter(&text) {
+            let (title, created, archived) = match split_front_matter(&text) {
                 Some((yaml, _)) => match serde_yml::from_str::<FrontMatter>(yaml) {
-                    Ok(fm) => (fm.title, fm.created),
-                    Err(_) => fallback_meta(&id, &meta),
+                    Ok(fm) => (fm.title, fm.created, fm.archived),
+                    Err(_) => {
+                        let (title, created) = fallback_meta(&id, &meta);
+                        (title, created, false)
+                    }
                 },
                 None => {
                     let (title, created) = fallback_meta(&id, &meta);
                     // 外部放入的文件补写 front matter
                     let body = text;
-                    write_note(&path, &title, created, &body);
-                    (title, created)
+                    write_note(&path, &title, created, false, &body);
+                    (title, created, false)
                 }
             };
             notes.push(Note {
@@ -65,6 +71,7 @@ impl Store {
                 title,
                 created,
                 modified,
+                archived,
                 path,
             });
         }
@@ -77,12 +84,13 @@ impl Store {
         let path = self.dir.join(format!("{id}.md"));
         let title = "Untitled".to_string();
         let created = Local::now();
-        write_note(&path, &title, created, "");
+        write_note(&path, &title, created, false, "");
         Note {
             id,
             title,
             created,
             modified: created,
+            archived: false,
             path,
         }
     }
@@ -97,7 +105,7 @@ impl Store {
 
     /// 保存正文与标题,mtime 随之更新
     pub fn save(&self, note: &mut Note, body: &str) {
-        write_note(&note.path, &note.title, note.created, body);
+        write_note(&note.path, &note.title, note.created, note.archived, body);
         note.modified = Local::now();
     }
 
@@ -105,7 +113,14 @@ impl Store {
     pub fn rename(&self, note: &mut Note, title: &str) {
         let body = self.body(note);
         note.title = title.to_string();
-        write_note(&note.path, &note.title, note.created, &body);
+        write_note(&note.path, &note.title, note.created, note.archived, &body);
+    }
+
+    /// 切换归档状态,只改写 front matter
+    pub fn set_archived(&self, note: &mut Note, archived: bool) {
+        let body = self.body(note);
+        note.archived = archived;
+        write_note(&note.path, &note.title, note.created, archived, &body);
     }
 
     /// 删除笔记,移入 .trash 目录
@@ -151,10 +166,11 @@ fn split_front_matter(text: &str) -> Option<(&str, &str)> {
 }
 
 /// 先写临时文件再 rename,避免写一半留下损坏的笔记
-fn write_note(path: &PathBuf, title: &str, created: DateTime<Local>, body: &str) {
+fn write_note(path: &PathBuf, title: &str, created: DateTime<Local>, archived: bool, body: &str) {
     let fm = serde_yml::to_string(&FrontMatter {
         title: title.to_string(),
         created,
+        archived,
     })
     .expect("serialize front matter");
     let text = format!("---\n{}\n---\n{body}", fm.trim_end());
@@ -239,5 +255,37 @@ mod tests {
         store.save(&mut note, "first");
         store.save(&mut note, "second");
         assert_eq!(store.body(&note), "second");
+    }
+
+    #[test]
+    fn archive_roundtrip() {
+        let dir = dir("archive_roundtrip");
+        let store = Store::new(dir.clone());
+        let mut note = store.create();
+        store.save(&mut note, "keep me");
+        store.set_archived(&mut note, true);
+        assert!(note.archived);
+
+        let mut notes = store.scan();
+        assert!(notes[0].archived);
+        assert_eq!(store.body(&notes[0]), "keep me");
+
+        store.set_archived(&mut notes[0], false);
+        assert!(!store.scan()[0].archived);
+    }
+
+    #[test]
+    fn missing_archived_defaults_false() {
+        let dir = dir("archived_default");
+        fs::create_dir_all(&dir).unwrap();
+        // 旧格式文件没有 archived 字段
+        fs::write(
+            dir.join("01J0000000000000000000AA.md"),
+            "---\ntitle: Old\ncreated: 2024-01-01T00:00:00+00:00\n---\nbody",
+        )
+        .unwrap();
+        let notes = Store::new(dir).scan();
+        assert_eq!(notes.len(), 1);
+        assert!(!notes[0].archived);
     }
 }
