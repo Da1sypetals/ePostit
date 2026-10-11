@@ -99,6 +99,9 @@ impl RootView {
                     this.set_sort(SortMode::from_label(value.as_ref()), cx);
                 }
             }),
+            cx.observe_window_activation(window, |this, window, cx| {
+                this.on_activation_change(window, cx)
+            }),
         ];
 
         let mut this = Self {
@@ -140,8 +143,9 @@ impl RootView {
         this
     }
 
-    /// 激活状态变化在 render 里轮询:聚焦注销全局热键,失焦注册并按需隐藏
-    fn check_activation(&mut self, window: &Window, cx: &mut Context<Self>) {
+    /// 激活状态由 observe_window_activation 事件驱动:聚焦注销全局热键,
+    /// 失焦注册并按需隐藏;窗口隐藏时 render 不再执行,轮询会漏掉失焦
+    fn on_activation_change(&mut self, window: &Window, cx: &mut Context<Self>) {
         let active = window.is_window_active();
         if active == self.window_active || self.hiding {
             return;
@@ -701,8 +705,7 @@ fn rel_time(t: DateTime<Local>) -> String {
 }
 
 impl Render for RootView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.check_activation(window, cx);
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme();
         let collapsed = self.collapsed;
         let sidebar_width = cx.global::<Config>().sidebar_width;

@@ -37,8 +37,10 @@ pub fn hide_window(cx: &mut App) {
 static HIDE_REQUESTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// 请求隐藏应用;headless 测试平台没有真实窗口可隐藏,只记录请求
+/// 隐藏后窗口必然失焦,就地注册全局热键,不依赖激活观察或 render 的时序
 pub fn request_hide(cx: &mut App) {
     HIDE_REQUESTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    hotkey::register();
     if !cfg!(test) {
         cx.hide();
     }
