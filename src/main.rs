@@ -55,6 +55,7 @@ pub fn show_window(cx: &mut App) {
         return;
     };
     let _ = cx.update_window(handle, |_, window, cx| {
+        move_window_to_mouse_screen(window);
         activate_app();
         window.activate_window();
         if let Some(root) = shared_root(cx) {
@@ -220,6 +221,47 @@ fn hide_traffic_lights(window: &mut Window) {
 
 #[cfg(not(target_os = "macos"))]
 fn hide_traffic_lights(_: &mut Window) {}
+
+/// 把窗口移动到鼠标所在显示屏的中央;找不到含鼠标的屏时不动
+#[cfg(target_os = "macos")]
+fn move_window_to_mouse_screen(window: &mut Window) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSEvent, NSScreen, NSView};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    let nsview: &NSView = unsafe { &*appkit.ns_view.as_ptr().cast::<NSView>() };
+    let Some(nswindow) = nsview.window() else {
+        return;
+    };
+    let mtm = unsafe { MainThreadMarker::new_unchecked() };
+    let mouse = NSEvent::mouseLocation();
+    for screen in NSScreen::screens(mtm).iter() {
+        let f = screen.frame();
+        let contains = mouse.x >= f.origin.x
+            && mouse.x < f.origin.x + f.size.width
+            && mouse.y >= f.origin.y
+            && mouse.y < f.origin.y + f.size.height;
+        if !contains {
+            continue;
+        }
+        let vf = screen.visibleFrame();
+        let wf = nswindow.frame();
+        let origin = objc2_foundation::NSPoint::new(
+            vf.origin.x + (vf.size.width - wf.size.width) / 2.0,
+            vf.origin.y + (vf.size.height - wf.size.height) / 2.0,
+        );
+        nswindow.setFrameOrigin(origin);
+        return;
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn move_window_to_mouse_screen(_: &mut Window) {}
 
 /// 隐藏 Dock 图标,成为菜单栏常驻应用
 #[cfg(target_os = "macos")]

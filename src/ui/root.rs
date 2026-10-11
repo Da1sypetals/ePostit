@@ -26,7 +26,9 @@ const ARCHIVE_SVG: &[u8] = include_bytes!("../../assets/icons/archive.svg");
 const UNARCHIVE_SVG: &[u8] = include_bytes!("../../assets/icons/unarchive.svg");
 const DELETE_SVG: &[u8] = include_bytes!("../../assets/icons/delete.svg");
 const CROSS_SVG: &[u8] = include_bytes!("../../assets/icons/cross.svg");
+const LOCK_SVG: &[u8] = include_bytes!("../../assets/icons/lock.svg");
 const RAIL_WIDTH: f32 = 48.;
+const TOOLTIP_DELAY: Duration = Duration::from_secs(1);
 
 pub struct RootView {
     list_focus: FocusHandle,
@@ -433,6 +435,7 @@ impl RootView {
         &self,
         id: &'static str,
         svg: &'static [u8],
+        tooltip: &'static str,
         on: fn(&mut Self, &mut Window, &mut Context<Self>),
         cx: &Context<Self>,
     ) -> Stateful<Div> {
@@ -448,6 +451,10 @@ impl RootView {
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| on(this, window, cx)),
             )
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tooltip).build(window, cx)
+            })
+            .tooltip_show_delay(TOOLTIP_DELAY)
     }
 
     /// 条目内悬停显示的操作按钮,点击不向下冒泡到条目
@@ -455,6 +462,7 @@ impl RootView {
         &self,
         id: impl Into<ElementId>,
         svg: &'static [u8],
+        tooltip: &'static str,
         on: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
@@ -478,6 +486,10 @@ impl RootView {
                     on(this, window, cx);
                 }),
             )
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tooltip).build(window, cx)
+            })
+            .tooltip_show_delay(TOOLTIP_DELAY)
     }
 
     /// 对当前聚焦的输入组件执行整行操作
@@ -581,12 +593,14 @@ impl RootView {
                                 .child(self.row_button(
                                     ("archive", ix),
                                     if archived { UNARCHIVE_SVG } else { ARCHIVE_SVG },
+                                    if archived { "Unarchive" } else { "Archive" },
                                     move |this, _, cx| this.toggle_archive(&archive_id, cx),
                                     cx,
                                 ))
                                 .child(self.row_button(
                                     ("delete", ix),
                                     DELETE_SVG,
+                                    "Delete",
                                     move |this, window, cx| {
                                         this.request_delete(&delete_id, window, cx)
                                     },
@@ -650,12 +664,14 @@ impl Render for RootView {
                     .child(self.icon_button(
                         "new-note",
                         EDIT_SVG,
+                        "New note",
                         |this, window, cx| this.create_note(window, cx),
                         cx,
                     ))
                     .child(self.icon_button(
                         "toggle-sidebar",
                         toggle_icon,
+                        "Toggle sidebar",
                         |this, _, cx| this.toggle_sidebar(cx),
                         cx,
                     ))
@@ -688,12 +704,14 @@ impl Render for RootView {
                                         .child(self.icon_button(
                                             "new-note",
                                             EDIT_SVG,
+                                            "New note",
                                             |this, window, cx| this.create_note(window, cx),
                                             cx,
                                         ))
                                         .child(self.icon_button(
                                             "toggle-sidebar",
                                             toggle_icon,
+                                            "Toggle sidebar",
                                             |this, _, cx| this.toggle_sidebar(cx),
                                             cx,
                                         )),
@@ -724,6 +742,7 @@ impl Render for RootView {
                                     this.child(self.row_button(
                                         "clear-search",
                                         CROSS_SVG,
+                                        "Clear search",
                                         |this, window, cx| this.clear_search(window, cx),
                                         cx,
                                     ))
@@ -792,7 +811,7 @@ impl Render for RootView {
                                                 h_flex()
                                                     .child(
                                                         div()
-                                                            .w(px(4.))
+                                                            .w(px(10.))
                                                             .h_full()
                                                             .flex_shrink_0()
                                                             .bg(t.list_active),
@@ -834,6 +853,17 @@ impl Render for RootView {
                     .h_8()
                     .window_control_area(WindowControlArea::Drag),
             )
+            // 归档笔记查看时左下角显示锁定标记
+            .when(editor_disabled, |this| {
+                this.child(
+                    div().absolute().bottom_4().left_4().child(
+                        Icon::default()
+                            .data(LOCK_SVG)
+                            .size_3p5()
+                            .text_color(t.muted_foreground),
+                    ),
+                )
+            })
             .child(
                 div().h_full().w_full().px_4().pt_4().child(
                     Editor::new(&self.editor)

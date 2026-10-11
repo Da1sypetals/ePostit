@@ -29,7 +29,6 @@ pub fn bind(cx: &mut App) {
     for ctx in CONTEXTS {
         cx.bind_keys([
             KeyBinding::new("escape", HideApp, Some(ctx)),
-            KeyBinding::new("cmd-n", NewNote, Some(ctx)),
             KeyBinding::new("cmd-q", QuitApp, Some(ctx)),
         ]);
     }
