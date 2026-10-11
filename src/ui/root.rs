@@ -1,3 +1,4 @@
+use super::settings::SettingsView;
 use crate::config::{Config, SortMode};
 use crate::hotkey;
 use crate::keymap::*;
@@ -27,6 +28,7 @@ const UNARCHIVE_SVG: &[u8] = include_bytes!("../../assets/icons/unarchive.svg");
 const DELETE_SVG: &[u8] = include_bytes!("../../assets/icons/delete.svg");
 const CROSS_SVG: &[u8] = include_bytes!("../../assets/icons/cross.svg");
 const LOCK_SVG: &[u8] = include_bytes!("../../assets/icons/lock.svg");
+const SETTINGS_SVG: &[u8] = include_bytes!("../../assets/icons/settings.svg");
 const RAIL_WIDTH: f32 = 48.;
 const TOOLTIP_DELAY: Duration = Duration::from_secs(1);
 
@@ -49,10 +51,12 @@ pub struct RootView {
     search_matches: HashSet<String>,
     // 空选区复制/剪切整行写入剪贴板的文本,粘贴时按文本匹配决定整行粘贴
     copied_line: Option<String>,
+    settings: Option<Entity<SettingsView>>,
     dirty: bool,
     save_gen: u64,
     window_active: bool,
     hiding: bool,
+    hide_requests: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -122,10 +126,12 @@ impl RootView {
             search_query: String::new(),
             search_matches: HashSet::new(),
             copied_line: None,
+            settings: None,
             dirty: false,
             save_gen: 0,
             window_active: window.is_window_active(),
             hiding: false,
+            hide_requests: 0,
             _subscriptions: subscriptions,
         };
         this.notes = this.store.scan();
@@ -144,8 +150,10 @@ impl RootView {
     }
 
     /// 激活状态由 observe_window_activation 事件驱动:聚焦注销全局热键,
-    /// 失焦注册并按需隐藏;窗口隐藏时 render 不再执行,轮询会漏掉失焦
-    fn on_activation_change(&mut self, window: &Window, cx: &mut Context<Self>) {
+    /// 失焦注册并按需隐藏;窗口隐藏时 render 不再执行,轮询会漏掉失焦。
+    /// 隐藏判定延迟 100ms 并检查 active_window:焦点在应用内窗口之间
+    /// 转移的过渡期间不触发隐藏
+    fn on_activation_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active = window.is_window_active();
         if active == self.window_active || self.hiding {
             return;
@@ -156,10 +164,27 @@ impl RootView {
         } else {
             hotkey::register();
             if cx.global::<Config>().hide_on_blur {
-                self.hiding = true;
                 self.flush_save(cx);
-                crate::request_hide(cx);
-                self.hiding = false;
+                let shown = crate::show_count();
+                cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(100))
+                        .await;
+                    this.update_in(cx, |this, _, cx| {
+                        // 延迟窗口内发生的唤起会撤销本次隐藏;
+                        // 激活通知滞后时不能仅凭 active_window 判定
+                        let decided = cx.active_window().is_none()
+                            && !this.hiding
+                            && crate::show_count() == shown;
+                        if decided {
+                            this.hiding = true;
+                            crate::request_hide(cx);
+                            this.hiding = false;
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
             }
         }
     }
@@ -176,9 +201,12 @@ impl RootView {
         }
     }
 
-    /// 切换笔记:先保存当前,再载入目标正文
+    /// 切换笔记:先保存当前,再载入目标正文;设置面板随之退出,
+    /// 点的就是当前笔记时同样退出面板回到编辑器
     fn open_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings = None;
         if self.current.as_deref() == Some(id) {
+            cx.notify();
             return;
         }
         self.flush_save(cx);
@@ -192,6 +220,7 @@ impl RootView {
     }
 
     pub fn create_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings = None;
         self.flush_save(cx);
         let note = self.store.create();
         let id = note.id.clone();
@@ -292,8 +321,27 @@ impl RootView {
         self.renaming = None;
         self.rename_input = None;
         self.flush_save(cx);
+        self.hide_requests += 1;
         crate::request_hide(cx);
         self.hiding = false;
+    }
+
+    /// 设置面板替换编辑器区域;已打开时保持现状。
+    /// 编辑器卸载后它的 FocusHandle 不再接收按键,焦点移到
+    /// 根元素始终持有的 list_focus,Escape 才能到达动作层
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_none() {
+            self.settings = Some(cx.new(|cx| SettingsView::new(window, cx)));
+        }
+        self.list_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// 退出设置面板回到编辑器,焦点还给编辑器
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings = None;
+        self.focus_editor(window, cx);
+        cx.notify();
     }
 
     pub fn focus_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -798,6 +846,13 @@ impl Render for RootView {
                     .gap_2()
                     .window_control_area(WindowControlArea::Drag)
                     .child(self.icon_button(
+                        "toggle-sidebar",
+                        toggle_icon,
+                        "Toggle sidebar",
+                        |this, _, cx| this.toggle_sidebar(cx),
+                        cx,
+                    ))
+                    .child(self.icon_button(
                         "new-note",
                         EDIT_SVG,
                         "New note",
@@ -805,10 +860,10 @@ impl Render for RootView {
                         cx,
                     ))
                     .child(self.icon_button(
-                        "toggle-sidebar",
-                        toggle_icon,
-                        "Toggle sidebar",
-                        |this, _, cx| this.toggle_sidebar(cx),
+                        "settings",
+                        SETTINGS_SVG,
+                        "Settings",
+                        |this, window, cx| this.open_settings(window, cx),
                         cx,
                     ))
             })
@@ -828,12 +883,6 @@ impl Render for RootView {
                                 .justify_between()
                                 .window_control_area(WindowControlArea::Drag)
                                 .child(
-                                    div()
-                                        .text_base()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child("ePostit"),
-                                )
-                                .child(
                                     h_flex()
                                         .gap_1()
                                         .items_center()
@@ -845,13 +894,20 @@ impl Render for RootView {
                                             cx,
                                         ))
                                         .child(self.icon_button(
-                                            "toggle-sidebar",
-                                            toggle_icon,
-                                            "Toggle sidebar",
-                                            |this, _, cx| this.toggle_sidebar(cx),
+                                            "settings",
+                                            SETTINGS_SVG,
+                                            "Settings",
+                                            |this, window, cx| this.open_settings(window, cx),
                                             cx,
                                         )),
-                                ),
+                                )
+                                .child(self.icon_button(
+                                    "toggle-sidebar",
+                                    toggle_icon,
+                                    "Toggle sidebar",
+                                    |this, _, cx| this.toggle_sidebar(cx),
+                                    cx,
+                                )),
                         )
                         .child(
                             h_flex()
@@ -903,7 +959,9 @@ impl Render for RootView {
                 )
             });
 
-        // Editor 元素每帧把 disabled 写回状态,锁定标记由渲染驱动
+        // Editor 元素每帧把 disabled 写回状态,锁定标记由渲染驱动;
+        // 设置面板打开时编辑器区域整个换成 SettingsView
+        let settings_open = self.settings.is_some();
         let editor_disabled = self
             .current
             .as_ref()
@@ -925,7 +983,7 @@ impl Render for RootView {
                     .window_control_area(WindowControlArea::Drag),
             )
             // 归档笔记查看时左下角显示锁定标记
-            .when(editor_disabled, |this| {
+            .when(!settings_open && editor_disabled, |this| {
                 this.child(
                     div().absolute().bottom_4().left_4().child(
                         Icon::default()
@@ -935,18 +993,36 @@ impl Render for RootView {
                     ),
                 )
             })
-            .child(
-                div().h_full().w_full().px_4().pt_4().child(
-                    Editor::new(&self.editor)
-                        .h_full()
-                        .w_full()
-                        .bordered(false)
-                        .appearance(false)
-                        .disabled(editor_disabled)
-                        .font(crate::theme::app_font())
-                        .text_size(px(15.)),
-                ),
-            );
+            .child(if let Some(settings) = self.settings.clone() {
+                div()
+                    .id("settings-pane")
+                    .h_full()
+                    .w_full()
+                    // 面板内焦点命中 SETTINGS_CONTEXT 的 Escape 绑定,
+                    // 动作冒泡到这里统一关闭
+                    .on_action(cx.listener(|this, _: &CloseSettings, window, cx| {
+                        this.close_settings(window, cx);
+                    }))
+                    .child(settings)
+                    .into_any_element()
+            } else {
+                div()
+                    .h_full()
+                    .w_full()
+                    .px_4()
+                    .pt_4()
+                    .child(
+                        Editor::new(&self.editor)
+                            .h_full()
+                            .w_full()
+                            .bordered(false)
+                            .appearance(false)
+                            .disabled(editor_disabled)
+                            .font(crate::theme::app_font())
+                            .text_size(px(15.)),
+                    )
+                    .into_any_element()
+            });
 
         h_flex()
             .key_context(APP_CONTEXT)
@@ -959,6 +1035,8 @@ impl Render for RootView {
                 // 有可退出的状态时先退出状态,下一次 Escape 才隐藏窗口
                 if this.renaming.is_some() {
                     this.cancel_rename(window, cx);
+                } else if this.settings.is_some() {
+                    this.close_settings(window, cx);
                 } else {
                     this.hide(cx);
                 }
@@ -1207,6 +1285,7 @@ mod tests {
             crate::keymap::bind(cx);
             cx.set_global(Config {
                 notes_dir: dir.clone(),
+                path: dir.join("config.toml"),
                 hide_on_blur: false,
                 ..Default::default()
             });
@@ -1264,11 +1343,10 @@ mod tests {
     fn escape_hides_and_flushes_immediately() {
         let cx = &mut TestAppContext::single();
         let dir = notes_dir("escape");
-        let (_view, cx) = harness(cx, &dir);
-        let before = crate::hide_count();
+        let (view, cx) = harness(cx, &dir);
         cx.simulate_input("pending text");
         cx.simulate_keystrokes("escape");
-        assert!(crate::hide_count() >= before + 1);
+        cx.update(|_, cx| assert!(view.read(cx).hide_requests >= 1));
         assert!(note_files(&dir)[0].1.contains("pending text"));
     }
 
@@ -1319,12 +1397,49 @@ mod tests {
         cx.dispatch_action(RenameNote);
         cx.cx.run_until_parked();
         cx.update(|_, cx| assert!(view.read(cx).renaming.is_some()));
-        let before = crate::hide_count();
         cx.simulate_keystrokes("escape");
         cx.update(|_, cx| assert!(view.read(cx).renaming.is_none()));
-        assert_eq!(crate::hide_count(), before);
+        cx.update(|_, cx| assert_eq!(view.read(cx).hide_requests, 0));
         cx.simulate_keystrokes("escape");
-        assert!(crate::hide_count() >= before + 1);
+        cx.update(|_, cx| assert_eq!(view.read(cx).hide_requests, 1));
+    }
+
+    #[test]
+    fn settings_replaces_editor_and_escape_returns() {
+        let cx = &mut TestAppContext::single();
+        let dir = notes_dir("settings_pane");
+        let (view, cx) = harness(cx, &dir);
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| this.open_settings(window, cx));
+        });
+        cx.update(|_, cx| assert!(view.read(cx).settings.is_some()));
+        // 第一次 Escape 关闭面板回到编辑器,第二次才隐藏窗口
+        cx.simulate_keystrokes("escape");
+        cx.update(|_, cx| assert!(view.read(cx).settings.is_none()));
+        cx.update(|_, cx| assert_eq!(view.read(cx).hide_requests, 0));
+        cx.simulate_keystrokes("escape");
+        cx.update(|_, cx| assert_eq!(view.read(cx).hide_requests, 1));
+    }
+
+    #[test]
+    fn clicking_current_note_exits_settings() {
+        let cx = &mut TestAppContext::single();
+        let dir = notes_dir("settings_back");
+        let (view, cx) = harness(cx, &dir);
+        let id = cx.update(|_, cx| view.read(cx).current.clone().unwrap());
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| this.open_settings(window, cx));
+        });
+        cx.update(|_, cx| assert!(view.read(cx).settings.is_some()));
+        // 设置打开时点当前笔记,回到编辑器且正文仍是该笔记
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| this.open_note(&id, window, cx));
+        });
+        cx.update(|_, cx| {
+            let this = view.read(cx);
+            assert!(this.settings.is_none());
+            assert_eq!(this.current.as_deref(), Some(id.as_str()));
+        });
     }
 
     #[test]

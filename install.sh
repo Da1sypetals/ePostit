@@ -28,4 +28,5 @@ touch "$DEST"
 "$LSREGISTER" -f "$DEST"
 killall iconservicesagent 2>/dev/null || true
 
-open "$DEST"
+# 后台拉起新实例:窗口不显示、不激活,安装过程零画面
+nohup env EPOSTIT_START_HIDDEN=1 "$DEST/Contents/MacOS/ePostit" >/dev/null 2>&1 &
